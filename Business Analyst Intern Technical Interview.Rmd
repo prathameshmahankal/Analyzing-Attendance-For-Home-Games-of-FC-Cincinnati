@@ -1,0 +1,170 @@
+---
+title: "Business Analyst Intern Technical Interview"
+output: pdf_document
+---
+
+```{r, echo=FALSE}
+library(caret)
+library(dplyr)
+```
+
+\textbf{\textcolor{blue}{Q1.}} Create a dataset of game-by-game home attendance for FC Cincinnati’s 2019 season using at least day of week, time of game, win percentage, and opponent. \newline
+
+```{r}
+df <- read.csv('match-by-match-report.csv')
+
+print(names(df))
+```
+
+We definitely dont need the first (Round) and the last two columns (Match Report and Notes) since they have no relation to the fan attendence Thus, we can remove them from our dataset.
+
+Additionally, variables like Captain, Formation and Refree shouldn't really affect the attendence in anyway (Though formation and results might be correlated, and the attendence is usually related to the results, so we could say formation is correlated as well, but for this particular case we will not consider that complexity)
+
+Finally, we are only conisdering home games here. Thus, we can get rid of the away games from our dataset.
+
+```{r}
+#Removing columns - round, match report and notes
+df = df[,2:15]
+
+#Removing columns - formation and referee
+df = df[,1:11]
+
+#Removing rows for home games
+df = df[df$Venue!='Away',]
+
+head(df)
+```
+
+Let us now check how the attendance for the game varied over the course of the year.
+
+```{r}
+df$ModifiedDate <- sapply(df$Date, function(x) (as.character(x)))
+df$Month <- sapply(df$ModifiedDate, function(x) substr(x,6,7))
+
+groupedbymth <- aggregate(df[,"Attendance"], list(df$Month), mean)
+plot(groupedbymth$Group.1, groupedbymth$x, 
+     type = "l", xlab = "Months"
+     , ylab = "Attendance", col="blue")
+```
+
+The attendance for home games rose up to 32000 by June, which could be due to the summer break.
+
+\textbf{\textcolor{blue}{Q2.}} Determine whether or not weekend games have a statistically significant impact on attendance and construct a game-by-game attendance forecast model for the 2020 season. \newline
+
+**Note:** In my analysis, I am considering the term weekend as 'Saturday' and 'Sunday'. I will next encode my Day variable into 1s for weekend and 0s for weekday.
+
+Also, since our data points for home games played in 2019 are very low, I have decided to append the data for home attendance for FC Cincinnati's home games in the USL as well (since we are only focusing on the Day Of The Week and Attendance)
+
+```{r}
+#Reading in data
+homeattendance <- read.csv('FCCincinnatiHomeAttendance.csv')
+
+#Getting rid of the away games
+homeattendance <- homeattendance[df$Venue!='Away',c('Day','Attendance')]
+homeattendance <- rbind(homeattendance, df[,c('Day','Attendance')])
+
+homeattendance <- homeattendance %>% mutate(Day = ifelse(Day == "Sat" | Day == "Sun",1,0))
+homeattendance$Day <- as.factor(homeattendance$Day)
+
+#Dummy encoding the day variable
+dmy <- dummyVars(" ~ .", data = homeattendance)
+trsf <- data.frame(predict(dmy, newdata = homeattendance))
+colnames(trsf)[1] <- "NotWeekend"
+colnames(trsf)[2] <- "Weekend"
+head(trsf)
+
+weekendimpact <- lm(Attendance~., data=trsf)
+summary(weekendimpact)
+```
+
+Thus, according to our model, the impact of a weekdays on the attendance is not statistically significant. \newline
+
+Before we build a forecasting model, let us add a few more variables to our data that logically would affect the attendance for a particular game.
+
+The attendence for a game usually depends a lot on the opponent quality. To check this, we can include opponent quality in our analysis. To calculate the opponent quality, I will consider two metrics for the last three seasons - Win Percentage and Goals Scored per game in the last three seasons.
+
+**The reason I chose these two metrics is:**  \newline
+
+**Win Percentage** - This metric usually tells us about how well has the team played over the duration of time. Since I am considering the past three season data, I am also taking into consideration the consistency of their performances.  \newline
+
+**Goals Per Game** - The other reason why crowds love watching game is the team the home team is playing against. If the opponent is a team that scores a lot of goals, it usually means that the team is very exciting to watch.  \newline
+
+```{r}
+#Import previous 3 season tables
+table2017 <- read.csv('MLS-2017-Table.csv')
+table2018 <- read.csv('MLS-2018-Table.csv')
+table2019 <- read.csv('MLS-2019-Table.csv')
+
+#Combining all the 3 season data into one dataframe
+prev3season <- rbind(table2017[,c('Squad','MP','W','D','GF')],
+      table2018[,c('Squad','MP','W','D','GF')],
+      table2019[,c('Squad','MP','W','D','GF')])
+
+#Grouping data by the team
+aggTeamData <- aggregate(as.matrix(prev3season[,2:5]), 
+                           by=list(Team=prev3season$Squad), 
+                           FUN = sum)
+
+#Win Percentage for each team
+aggTeamData$WinPct <- (aggTeamData$W + (0.5 * aggTeamData$D))/aggTeamData$MP
+
+#Goals scored by the team per game
+aggTeamData$GoalPerGame <- (aggTeamData$GF)/aggTeamData$MP
+
+#Getting a list of the top performing teams according to our metrics
+aggTeamData[order(-aggTeamData$WinPct),]
+
+#Merging this dataframe into our main dataframe
+df_merged <- merge(df[,c("Opponent","Day","Attendance")], aggTeamData[, c("Team","WinPct","GoalPerGame")], by.x = 'Opponent', by.y = 'Team', all.x = TRUE)
+
+```
+
+Build a forecasting model:
+
+```{r}
+forcastmodel <- lm(Attendance~WinPct+GoalPerGame , data=df_merged)
+summary(forcastmodel)
+```
+
+We can see that for our model, the Goals Per Game variable and Win Percentage are statitically significant. Again, whether the day was a weekday or a weekend was surprisingly not making that big a difference, so I got rid of it. But then again, it could easily be because of the lack of data. The above model has an adjusted R-squared of 0.57, which is way better than the model we created using on the day of the week.
+
+Now as a final step, we can predict the attendence for the upcoming season.
+
+
+\textbf{\textcolor{blue}{Q3.}} \newline Determine whether or not win percentage at the time of the game has a significant impact on attendance.
+
+**Assumption:** My interpretation is that a win percentage at the time of a game is the number of games the team has won plus the 0.5 times number of games the team drew. This whole thing is then divided by the number of games played till the time of the game. These calculations are done in a cumulative way.
+
+```{r}
+df <- df %>% 
+  mutate(EncodedResult = ifelse(Result == "W" ,1,ifelse(Result == "D" ,0.5,0)))
+df_modified <- df[,c("EncodedResult","Attendance")]
+df_modified$winratio <- cumsum(df_modified[, 1])/seq(nrow(df_modified))
+head(df_modified)
+
+print(cor(df_modified$Attendance, df_modified$winratio))
+
+winpctmodel <- lm(Attendance~winratio, data = df_modified)
+summary(winpctmodel)
+```
+
+The win percentage ratio has a decent correlation of 0.46 with the attendance. However, we clearly see that the winratio vairable is not statitically significant in determining the attendance values.
+
+\textbf{\textcolor{blue}{Q4.}} What other data, variables, or means of analysis would you consider for looking at this problem further?
+
+1. Ideally, I would have loved to include the performance of the Orange and Blue against a particular team during the previous seasons to predict the amount of people attending a game against that team. However, since the 2019 season was the first season when FC Cincinnati played in the MLS, we cannot calculate that statistic.
+
+2. Historically, games against rivals are the ones that have the maximum attendence (especially if it is a derby, since the people from both teams can attend the games).
+However, this belief does not hold true since the attendance for the home game against Columbus Crew (Cincinnati's rivals) was only 3rd in the ranking.
+
+```{r}
+head(df[order(-df$Attendance),c('Day','Opponent','Attendance')])
+```
+
+However, once possible justification for this that I can think of is that the game against Portland was the first home game of the season for FC Cincinnati. And given that this was their first home game of their MLS campaign as well, the attendance was expected to be the highest.
+
+The possible explanation for the second highest attendance to be for the LA Galaxy game is that LA Galaxy had ZLATAN last season!! And come on, who doesn't want to watch Zlatan play?
+
+3. Another variable which I believe might affect the attendence would be the weather. If the weather was very bad (heavy rains, snow or winds), the attendence is expected to be negatively affected.
+
+**SIDE NOTE:** I thoroughly enjoyed this take home assignment. Even more since I am a huge soccer fan myself. I'm new to MLS though, and the upcoming season would be the first season that I will be watching from start to end. I'm really looking forward to FC Cincinnati's performance this season. Good luck for your second season in the top flight!!
